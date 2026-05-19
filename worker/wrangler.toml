@@ -1,0 +1,14 @@
+name = "codexbin-worker"
+main = "index.js"
+compatibility_date = "2026-05-18"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "PASTES"
+id = "PASTES_KV_NAMESPACE_ID"
+preview_id = "PASTES_KV_PREVIEW_NAMESPACE_ID"
+
+[[kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "RATE_LIMITS_KV_NAMESPACE_ID"
+preview_id = "RATE_LIMITS_KV_PREVIEW_NAMESPACE_ID"

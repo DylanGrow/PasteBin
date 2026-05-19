@@ -1,0 +1,56 @@
+:root {
+  --codexbin-radius: 0.75rem;
+}
+
+body {
+  min-height: 100vh;
+  background-image:
+    radial-gradient(circle at 0% 0%, rgba(13, 110, 253, 0.12), transparent 40%),
+    radial-gradient(circle at 100% 100%, rgba(25, 135, 84, 0.12), transparent 40%);
+}
+
+.card {
+  border-radius: var(--codexbin-radius);
+}
+
+textarea.form-control {
+  resize: vertical;
+}
+
+.paste-render {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  min-height: 8rem;
+  background: var(--bs-body-bg);
+}
+
+.paste-render pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.paste-render code {
+  border-radius: 0.5rem;
+  display: block;
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.comment-item {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  background: var(--bs-tertiary-bg);
+}
+
+.comment-item pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+[data-bs-theme="light"] #qrHost {
+  border: 1px solid #dee2e6;
+}
