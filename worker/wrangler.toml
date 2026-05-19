@@ -12,3 +12,7 @@ preview_id = "PASTES_KV_PREVIEW_NAMESPACE_ID"
 binding = "RATE_LIMITS"
 id = "RATE_LIMITS_KV_NAMESPACE_ID"
 preview_id = "RATE_LIMITS_KV_PREVIEW_NAMESPACE_ID"
+
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "codexbin-attachments"

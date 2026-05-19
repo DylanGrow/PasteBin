@@ -87,7 +87,17 @@ function toggleTheme() {
 function setTheme(theme) {
   document.body.setAttribute("data-bs-theme", theme);
   localStorage.setItem(THEME_STORAGE_KEY, theme);
-  el.themeToggle.innerHTML = theme === "dark" ? '<i class="bi bi-moon-stars"></i>' : '<i class="bi bi-sun"></i>';
+  const moon = document.getElementById("themeMoonIcon");
+  const sun = document.getElementById("themeSunIcon");
+  if (moon && sun) {
+    if (theme === "dark") {
+      moon.classList.remove("d-none");
+      sun.classList.add("d-none");
+    } else {
+      moon.classList.add("d-none");
+      sun.classList.remove("d-none");
+    }
+  }
 }
 
 function initializeApiBase() {
@@ -125,47 +135,55 @@ async function createPaste() {
   setCreateLoading(true);
 
   try {
-    const formatter = el.formatter.value;
-    const payload = await buildPlainPayload(text, formatter, file);
+    const formatter  = el.formatter.value;
+    const masterKey  = await generateMasterKey();
+    const fragment   = await buildFragment(masterKey, el.password.value);
 
-    const masterKey = await generateMasterKey();
-    const encryptedPayload = await encryptJson(payload, masterKey);
-    const fragment = await buildFragment(masterKey, el.password.value);
+    // Phase 1 — encrypt the text payload and POST it to KV
+    const plainPayload    = { text, formatter, createdAt: new Date().toISOString() };
+    const encryptedPayload = await encryptJson(plainPayload, masterKey);
 
-    const body = {
-      ciphertext: encryptedPayload.ciphertext,
-      iv: encryptedPayload.iv,
-      expiration: el.expiration.value,
+    const pasteBody = {
+      ciphertext:      encryptedPayload.ciphertext,
+      iv:              encryptedPayload.iv,
+      expiration:      el.expiration.value,
       burnAfterReading: el.burnAfterReading.checked,
-      openDiscussion: el.openDiscussion.checked,
+      openDiscussion:  el.openDiscussion.checked,
       formatter
     };
 
     const response = await apiJson("/api/paste", {
       method: "POST",
-      body: JSON.stringify(body)
+      body:   JSON.stringify(pasteBody)
     });
+
+    // Phase 2 (optional) — stream encrypted attachment binary to R2
+    if (file) {
+      await uploadAttachment(response.id, file, masterKey);
+    }
 
     const shareUrl = `${window.location.origin}${window.location.pathname}?p=${encodeURIComponent(response.id)}#${fragment}`;
 
-    state.pasteId = response.id;
+    state.pasteId   = response.id;
     state.pasteMeta = {
-      id: response.id,
-      createdAt: new Date().toISOString(),
-      expiresAt: response.expiresAt,
+      id:              response.id,
+      createdAt:       new Date().toISOString(),
+      expiresAt:       response.expiresAt,
       burnAfterReading: response.burnAfterReading,
-      openDiscussion: response.openDiscussion,
+      openDiscussion:  response.openDiscussion,
+      hasAttachment:   Boolean(file),
+      attachmentMeta:  file ? { name: file.name, type: file.type, size: file.size } : null,
       formatter
     };
-    state.masterKey = masterKey;
-    state.decryptedPaste = payload;
+    state.masterKey       = masterKey;
+    state.decryptedPaste  = plainPayload;
     state.currentShareUrl = shareUrl;
-    state.deleteToken = response.deleteToken;
+    state.deleteToken     = response.deleteToken;
 
     sessionStorage.setItem(`delete-token:${response.id}`, response.deleteToken);
     history.replaceState(null, "", `?p=${encodeURIComponent(response.id)}#${fragment}`);
 
-    renderDecryptedPaste(payload, state.pasteMeta);
+    renderDecryptedPaste(plainPayload, state.pasteMeta);
     toggleDiscussion(state.pasteMeta.openDiscussion);
     renderComments([]);
 
@@ -182,39 +200,66 @@ async function createPaste() {
   }
 }
 
-async function loadPasteFromUrl() {
-  const params = new URLSearchParams(window.location.search);
-  const pasteId = params.get("p");
+// Encrypt file → stream raw binary to R2 via PUT /api/paste/:id/attachment
+async function uploadAttachment(pasteId, file, masterKey) {
+  const buffer   = await file.arrayBuffer();
+  const iv       = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, masterKey, buffer);
 
-  if (!pasteId) {
-    return;
+  const meta = JSON.stringify({
+    name: file.name,
+    type: file.type || "application/octet-stream",
+    size: file.size,
+    iv:   bytesToBase64Url(iv)
+  });
+
+  const res = await fetch(buildApiUrl(`/api/paste/${encodeURIComponent(pasteId)}/attachment`), {
+    method:  "PUT",
+    headers: {
+      "Content-Type":     "application/octet-stream",
+      "X-Attachment-Meta": meta
+    },
+    body: encrypted
+  });
+
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error(j.error || `Attachment upload failed: HTTP ${res.status}`);
   }
+}
+
+async function loadPasteFromUrl() {
+  const params  = new URLSearchParams(window.location.search);
+  const pasteId = params.get("p");
+  if (!pasteId) return;
 
   try {
     const response = await apiJson(`/api/paste/${encodeURIComponent(pasteId)}`);
-    const key = await resolveKeyFromFragment();
+    const key      = await resolveKeyFromFragment();
     const plaintext = await decryptToText(response.payload, key);
-    const payload = JSON.parse(plaintext);
+    const payload   = JSON.parse(plaintext);
 
-    state.pasteId = pasteId;
-    state.pasteMeta = response;
-    state.masterKey = key;
-    state.decryptedPaste = payload;
+    state.pasteId         = pasteId;
+    state.pasteMeta       = response;
+    state.masterKey       = key;
+    state.decryptedPaste  = payload;
     state.currentShareUrl = window.location.href;
-    state.deleteToken = sessionStorage.getItem(`delete-token:${pasteId}`);
+    state.deleteToken     = sessionStorage.getItem(`delete-token:${pasteId}`);
 
     renderDecryptedPaste(payload, response);
     toggleDiscussion(response.openDiscussion);
 
     if (response.openDiscussion) {
-      try {
-        await refreshComments();
-      } catch {
-        renderComments([]);
-      }
+      try { await refreshComments(); } catch { renderComments([]); }
     }
 
-    showAlert("success", response.burnAfterReading ? "Paste opened. This burn-after-reading paste is now deleted server-side." : "Paste decrypted successfully.", 7000);
+    showAlert(
+      "success",
+      response.burnAfterReading
+        ? "Paste opened. Burn-after-reading: deleted from server."
+        : "Paste decrypted successfully.",
+      7000
+    );
   } catch (error) {
     showAlert("danger", `Could not open paste: ${error.message}`);
   }
@@ -281,7 +326,7 @@ function renderQrCode() {
     return;
   }
 
-  el.qrHost.innerHTML = "";
+  el.qrHost.textContent = "";
   qrCode = new QRCode(el.qrHost, {
     text: state.currentShareUrl,
     width: 220,
@@ -370,7 +415,7 @@ async function refreshComments() {
 }
 
 function renderComments(comments) {
-  el.commentsList.innerHTML = "";
+  el.commentsList.textContent = "";
 
   if (!comments.length) {
     const empty = document.createElement("p");
@@ -401,7 +446,7 @@ function renderComments(comments) {
 function renderDecryptedPaste(payload, meta) {
   const formatter = payload.formatter || meta.formatter || "plain";
 
-  el.pasteRender.innerHTML = "";
+  el.pasteRender.textContent = "";
   if (formatter === "markdown") {
     const html = marked.parse(payload.text || "");
     el.pasteRender.innerHTML = DOMPurify.sanitize(html);
@@ -417,18 +462,39 @@ function renderDecryptedPaste(payload, meta) {
     el.pasteRender.appendChild(pre);
   }
 
-  if (payload.attachment) {
-    if (state.attachmentUrl) {
-      URL.revokeObjectURL(state.attachmentUrl);
-    }
-
-    const bytes = base64UrlToBytes(payload.attachment.data);
-    const blob = new Blob([bytes], { type: payload.attachment.type || "application/octet-stream" });
-    state.attachmentUrl = URL.createObjectURL(blob);
-
-    el.attachmentLink.href = state.attachmentUrl;
-    el.attachmentLink.download = payload.attachment.name || "attachment.bin";
-    el.attachmentLink.textContent = `Download ${payload.attachment.name || "attachment"} (${formatBytes(payload.attachment.size || bytes.byteLength)})`;
+  // R2 attachment: fetched on demand when the user clicks Download
+  if (meta.hasAttachment && meta.attachmentMeta) {
+    const am = meta.attachmentMeta;
+    el.attachmentLink.textContent = `Download ${am.name || "attachment"} (${formatBytes(am.size || 0)})`;
+    el.attachmentLink.removeAttribute("href");
+    el.attachmentLink.removeAttribute("download");
+    el.attachmentLink.onclick = async (e) => {
+      e.preventDefault();
+      if (state.attachmentUrl) {
+        // Already fetched — just trigger download
+        triggerDownload(state.attachmentUrl, am.name || "attachment.bin");
+        return;
+      }
+      el.attachmentLink.textContent = "Downloading…";
+      try {
+        const res = await fetch(
+          buildApiUrl(`/api/paste/${encodeURIComponent(state.pasteId)}/attachment`)
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const encryptedBuffer = await res.arrayBuffer();
+        const iv = base64UrlToBytes(am.iv);
+        const decrypted = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv }, state.masterKey, encryptedBuffer
+        );
+        const blob = new Blob([decrypted], { type: am.type || "application/octet-stream" });
+        state.attachmentUrl = URL.createObjectURL(blob);
+        triggerDownload(state.attachmentUrl, am.name || "attachment.bin");
+        el.attachmentLink.textContent = `Download ${am.name} (${formatBytes(am.size || decrypted.byteLength)})`;
+      } catch (err) {
+        showAlert("danger", `Attachment download failed: ${err.message}`);
+        el.attachmentLink.textContent = `Download ${am.name || "attachment"} (${formatBytes(am.size || 0)})`;
+      }
+    };
     el.attachmentView.classList.remove("d-none");
   } else {
     el.attachmentView.classList.add("d-none");
@@ -612,10 +678,21 @@ function setCreateLoading(loading) {
 
 function showAlert(type, message, timeoutMs = 4500) {
   const wrapper = document.createElement("div");
-  wrapper.className = `alert alert-${type} alert-dismissible fade show`;
+  wrapper.className = `alert alert-${type} alert-dismissible fade show d-flex justify-content-between align-items-center`;
   wrapper.role = "alert";
-  wrapper.innerHTML = `${escapeHtml(message)}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>`;
-  el.alertHost.innerHTML = "";
+
+  const textSpan = document.createElement("span");
+  textSpan.textContent = message;
+  wrapper.appendChild(textSpan);
+
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "btn-close";
+  closeBtn.setAttribute("data-bs-dismiss", "alert");
+  closeBtn.setAttribute("aria-label", "Close");
+  wrapper.appendChild(closeBtn);
+
+  el.alertHost.textContent = "";
   el.alertHost.appendChild(wrapper);
 
   if (timeoutMs > 0) {
@@ -652,6 +729,16 @@ function base64UrlToBytes(value) {
   }
 
   return bytes;
+}
+
+function triggerDownload(url, filename) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 function formatBytes(bytes) {
