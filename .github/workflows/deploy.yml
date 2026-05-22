@@ -1,27 +1,24 @@
-name: Deploy Cloudflare Worker
+name: Deploy GitHub Pages
 
 on:
   push:
     branches:
       - main
     paths:
-      - "worker/**"
+      - "docs/**"
       - ".github/workflows/deploy.yml"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v3
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
         with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          workingDirectory: worker
-          command: deploy
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs

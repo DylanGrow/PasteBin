@@ -1,15 +1,14 @@
-const DEFAULT_API_BASE = "https://your-worker-subdomain.workers.dev";
+const GITHUB_PAT = "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";
 const THEME_STORAGE_KEY = "codexbin-theme";
-const API_BASE_STORAGE_KEY = "codexbin-api-base";
 
 const state = {
   pasteId: null,
   pasteMeta: null,
   masterKey: null,
   decryptedPaste: null,
-  deleteToken: null,
   currentShareUrl: "",
-  attachmentUrl: null
+  attachmentUrl: null,
+  gistFiles: null // Store gist files for downloading attachments
 };
 
 const el = {
@@ -19,7 +18,6 @@ const el = {
   formatter: document.getElementById("formatter"),
   password: document.getElementById("password"),
   attachment: document.getElementById("attachment"),
-  apiBase: document.getElementById("apiBase"),
   burnAfterReading: document.getElementById("burnAfterReading"),
   openDiscussion: document.getElementById("openDiscussion"),
   createBtn: document.getElementById("createBtn"),
@@ -46,7 +44,6 @@ let qrCode = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   initializeTheme();
-  initializeApiBase();
   wireEvents();
   loadPasteFromUrl();
 });
@@ -60,16 +57,6 @@ function wireEvents() {
   el.qrBtn.addEventListener("click", renderQrCode);
   el.deleteBtn.addEventListener("click", deleteCurrentPaste);
   el.addCommentBtn.addEventListener("click", addEncryptedComment);
-
-  el.apiBase.addEventListener("change", () => {
-    const normalized = normalizeApiBase(el.apiBase.value);
-    el.apiBase.value = normalized;
-    if (normalized) {
-      localStorage.setItem(API_BASE_STORAGE_KEY, normalized);
-    } else {
-      localStorage.removeItem(API_BASE_STORAGE_KEY);
-    }
-  });
 }
 
 function initializeTheme() {
@@ -100,27 +87,32 @@ function setTheme(theme) {
   }
 }
 
-function initializeApiBase() {
-  const saved = localStorage.getItem(API_BASE_STORAGE_KEY);
-  const value = saved || DEFAULT_API_BASE;
-  el.apiBase.value = value;
-}
+async function githubApiJson(path, options = {}) {
+  const headers = {
+    "Accept": "application/vnd.github.v3+json",
+    "Authorization": `token ${GITHUB_PAT}`,
+    ...(options.headers || {})
+  };
 
-function normalizeApiBase(value) {
-  return value.trim().replace(/\/+$/, "");
-}
-
-function getApiBase() {
-  const base = normalizeApiBase(el.apiBase.value);
-  if (!base) {
-    throw new Error("Set your Worker API base URL first.");
+  if (options.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
   }
-  localStorage.setItem(API_BASE_STORAGE_KEY, base);
-  return base;
-}
 
-function buildApiUrl(path) {
-  return `${getApiBase()}${path}`;
+  const response = await fetch(`https://api.github.com${path}`, {
+    ...options,
+    headers
+  });
+
+  if (response.status === 204) return null;
+
+  const json = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const message = json.message || `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+
+  return json;
 }
 
 async function createPaste() {
@@ -132,6 +124,11 @@ async function createPaste() {
     return;
   }
 
+  if (GITHUB_PAT === "YOUR_GITHUB_PAT_HERE") {
+    showAlert("danger", "GitHub PAT not configured. Set GITHUB_PAT in app.js.");
+    return;
+  }
+
   setCreateLoading(true);
 
   try {
@@ -139,7 +136,6 @@ async function createPaste() {
     const masterKey  = await generateMasterKey();
     const fragment   = await buildFragment(masterKey, el.password.value);
 
-    // Phase 1 — encrypt the text payload and POST it to KV
     const plainPayload    = { text, formatter, createdAt: new Date().toISOString() };
     const encryptedPayload = await encryptJson(plainPayload, masterKey);
 
@@ -152,35 +148,54 @@ async function createPaste() {
       formatter
     };
 
-    const response = await apiJson("/api/paste", {
-      method: "POST",
-      body:   JSON.stringify(pasteBody)
-    });
+    const files = {};
 
-    // Phase 2 (optional) — stream encrypted attachment binary to R2
     if (file) {
-      await uploadAttachment(response.id, file, masterKey);
+      if (file.size > 1024 * 1024) {
+        throw new Error("Attachment too large for GitHub Gists (max 1MB).");
+      }
+      const buffer = await file.arrayBuffer();
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encryptedFile = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, masterKey, buffer);
+      
+      const attachmentMeta = {
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        iv: bytesToBase64Url(iv)
+      };
+      
+      pasteBody.hasAttachment = true;
+      pasteBody.attachmentMeta = attachmentMeta;
+      
+      files["attachment.b64"] = {
+        content: bytesToBase64Url(new Uint8Array(encryptedFile))
+      };
     }
+
+    files["paste.json"] = {
+      content: JSON.stringify(pasteBody)
+    };
+
+    const response = await githubApiJson("/gists", {
+      method: "POST",
+      body: JSON.stringify({
+        description: "CodexBin Paste",
+        public: false,
+        files: files
+      })
+    });
 
     const shareUrl = `${window.location.origin}${window.location.pathname}?p=${encodeURIComponent(response.id)}#${fragment}`;
 
     state.pasteId   = response.id;
-    state.pasteMeta = {
-      id:              response.id,
-      createdAt:       new Date().toISOString(),
-      expiresAt:       response.expiresAt,
-      burnAfterReading: response.burnAfterReading,
-      openDiscussion:  response.openDiscussion,
-      hasAttachment:   Boolean(file),
-      attachmentMeta:  file ? { name: file.name, type: file.type, size: file.size } : null,
-      formatter
-    };
+    state.pasteMeta = pasteBody;
+    state.pasteMeta.createdAt = new Date().toISOString();
     state.masterKey       = masterKey;
     state.decryptedPaste  = plainPayload;
     state.currentShareUrl = shareUrl;
-    state.deleteToken     = response.deleteToken;
+    state.gistFiles       = response.files;
 
-    sessionStorage.setItem(`delete-token:${response.id}`, response.deleteToken);
     history.replaceState(null, "", `?p=${encodeURIComponent(response.id)}#${fragment}`);
 
     renderDecryptedPaste(plainPayload, state.pasteMeta);
@@ -200,66 +215,63 @@ async function createPaste() {
   }
 }
 
-// Encrypt file → stream raw binary to R2 via PUT /api/paste/:id/attachment
-async function uploadAttachment(pasteId, file, masterKey) {
-  const buffer   = await file.arrayBuffer();
-  const iv       = crypto.getRandomValues(new Uint8Array(12));
-  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, masterKey, buffer);
-
-  const meta = JSON.stringify({
-    name: file.name,
-    type: file.type || "application/octet-stream",
-    size: file.size,
-    iv:   bytesToBase64Url(iv)
-  });
-
-  const res = await fetch(buildApiUrl(`/api/paste/${encodeURIComponent(pasteId)}/attachment`), {
-    method:  "PUT",
-    headers: {
-      "Content-Type":     "application/octet-stream",
-      "X-Attachment-Meta": meta
-    },
-    body: encrypted
-  });
-
-  if (!res.ok) {
-    const j = await res.json().catch(() => ({}));
-    throw new Error(j.error || `Attachment upload failed: HTTP ${res.status}`);
-  }
-}
-
 async function loadPasteFromUrl() {
   const params  = new URLSearchParams(window.location.search);
   const pasteId = params.get("p");
   if (!pasteId) return;
 
+  if (GITHUB_PAT === "YOUR_GITHUB_PAT_HERE") {
+    showAlert("danger", "GitHub PAT not configured. Set GITHUB_PAT in app.js.");
+    return;
+  }
+
   try {
-    const response = await apiJson(`/api/paste/${encodeURIComponent(pasteId)}`);
-    const key      = await resolveKeyFromFragment();
-    const plaintext = await decryptToText(response.payload, key);
-    const payload   = JSON.parse(plaintext);
+    const response = await githubApiJson(`/gists/${encodeURIComponent(pasteId)}`);
+    const pasteFile = response.files["paste.json"];
+    if (!pasteFile) throw new Error("Invalid paste gist.");
+    
+    let pasteMeta = JSON.parse(pasteFile.content);
+    pasteMeta.createdAt = response.created_at;
+
+    // Check expiration
+    const createdAt = new Date(response.created_at).getTime();
+    const now = Date.now();
+    let expired = false;
+    
+    if (pasteMeta.expiration === "5min" && now - createdAt > 5 * 60 * 1000) expired = true;
+    else if (pasteMeta.expiration === "1hr" && now - createdAt > 60 * 60 * 1000) expired = true;
+    else if (pasteMeta.expiration === "1day" && now - createdAt > 24 * 60 * 60 * 1000) expired = true;
+    else if (pasteMeta.expiration === "1week" && now - createdAt > 7 * 24 * 60 * 60 * 1000) expired = true;
+    
+    if (expired) {
+      await githubApiJson(`/gists/${encodeURIComponent(pasteId)}`, { method: "DELETE" }).catch(() => {});
+      throw new Error("Paste has expired.");
+    }
+
+    const key = await resolveKeyFromFragment();
+    const plaintext = await decryptToText({ iv: pasteMeta.iv, ciphertext: pasteMeta.ciphertext }, key);
+    const payload = JSON.parse(plaintext);
 
     state.pasteId         = pasteId;
-    state.pasteMeta       = response;
+    state.pasteMeta       = pasteMeta;
     state.masterKey       = key;
     state.decryptedPaste  = payload;
     state.currentShareUrl = window.location.href;
-    state.deleteToken     = sessionStorage.getItem(`delete-token:${pasteId}`);
+    state.gistFiles       = response.files;
 
-    renderDecryptedPaste(payload, response);
-    toggleDiscussion(response.openDiscussion);
+    renderDecryptedPaste(payload, pasteMeta);
+    toggleDiscussion(pasteMeta.openDiscussion);
 
-    if (response.openDiscussion) {
+    if (pasteMeta.openDiscussion) {
       try { await refreshComments(); } catch { renderComments([]); }
     }
 
-    showAlert(
-      "success",
-      response.burnAfterReading
-        ? "Paste opened. Burn-after-reading: deleted from server."
-        : "Paste decrypted successfully.",
-      7000
-    );
+    if (pasteMeta.burnAfterReading) {
+      await githubApiJson(`/gists/${encodeURIComponent(pasteId)}`, { method: "DELETE" }).catch(() => {});
+      showAlert("success", "Paste opened. Burn-after-reading: deleted from server.", 7000);
+    } else {
+      showAlert("success", "Paste decrypted successfully.", 7000);
+    }
   } catch (error) {
     showAlert("danger", `Could not open paste: ${error.message}`);
   }
@@ -270,8 +282,8 @@ function prepareNewPaste() {
   state.pasteMeta = null;
   state.masterKey = null;
   state.decryptedPaste = null;
-  state.deleteToken = null;
   state.currentShareUrl = "";
+  state.gistFiles = null;
 
   if (state.attachmentUrl) {
     URL.revokeObjectURL(state.attachmentUrl);
@@ -341,22 +353,14 @@ async function deleteCurrentPaste() {
     return;
   }
 
-  if (!state.deleteToken) {
-    showAlert("warning", "Delete token is unavailable in this browser session.");
-    return;
-  }
-
   const confirmed = window.confirm("Delete this paste permanently?");
   if (!confirmed) {
     return;
   }
 
   try {
-    await apiJson(`/api/paste/${encodeURIComponent(state.pasteId)}`, {
-      method: "DELETE",
-      headers: {
-        "X-Delete-Token": state.deleteToken
-      }
+    await githubApiJson(`/gists/${encodeURIComponent(state.pasteId)}`, {
+      method: "DELETE"
     });
 
     showAlert("success", "Paste deleted.");
@@ -380,10 +384,11 @@ async function addEncryptedComment() {
 
   try {
     const encrypted = await encryptText(text, state.masterKey);
+    const commentBody = JSON.stringify(encrypted);
 
-    await apiJson(`/api/paste/${encodeURIComponent(state.pasteId)}/comment`, {
+    await githubApiJson(`/gists/${encodeURIComponent(state.pasteId)}/comments`, {
       method: "POST",
-      body: JSON.stringify(encrypted)
+      body: JSON.stringify({ body: commentBody })
     });
 
     el.newComment.value = "";
@@ -399,15 +404,16 @@ async function refreshComments() {
     return;
   }
 
-  const data = await apiJson(`/api/paste/${encodeURIComponent(state.pasteId)}/comments`);
+  const comments = await githubApiJson(`/gists/${encodeURIComponent(state.pasteId)}/comments`);
   const decrypted = [];
 
-  for (const item of data.comments || []) {
+  for (const item of comments || []) {
     try {
-      const text = await decryptToText({ iv: item.iv, ciphertext: item.ciphertext }, state.masterKey);
-      decrypted.push({ createdAt: item.createdAt, text });
+      const parsed = JSON.parse(item.body);
+      const text = await decryptToText({ iv: parsed.iv, ciphertext: parsed.ciphertext }, state.masterKey);
+      decrypted.push({ createdAt: item.created_at, text });
     } catch {
-      decrypted.push({ createdAt: item.createdAt, text: "[Unable to decrypt this comment]" });
+      decrypted.push({ createdAt: item.created_at, text: "[Unable to decrypt this comment]" });
     }
   }
 
@@ -462,7 +468,6 @@ function renderDecryptedPaste(payload, meta) {
     el.pasteRender.appendChild(pre);
   }
 
-  // R2 attachment: fetched on demand when the user clicks Download
   if (meta.hasAttachment && meta.attachmentMeta) {
     const am = meta.attachmentMeta;
     el.attachmentLink.textContent = `Download ${am.name || "attachment"} (${formatBytes(am.size || 0)})`;
@@ -471,17 +476,21 @@ function renderDecryptedPaste(payload, meta) {
     el.attachmentLink.onclick = async (e) => {
       e.preventDefault();
       if (state.attachmentUrl) {
-        // Already fetched — just trigger download
         triggerDownload(state.attachmentUrl, am.name || "attachment.bin");
         return;
       }
       el.attachmentLink.textContent = "Downloading…";
       try {
-        const res = await fetch(
-          buildApiUrl(`/api/paste/${encodeURIComponent(state.pasteId)}/attachment`)
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const encryptedBuffer = await res.arrayBuffer();
+        const attachmentFile = state.gistFiles["attachment.b64"];
+        if (!attachmentFile) throw new Error("Attachment file not found in Gist");
+        
+        let content = attachmentFile.content;
+        if (attachmentFile.truncated) {
+          const rawRes = await fetch(attachmentFile.raw_url);
+          content = await rawRes.text();
+        }
+        
+        const encryptedBuffer = base64UrlToBytes(content).buffer;
         const iv = base64UrlToBytes(am.iv);
         const decrypted = await crypto.subtle.decrypt(
           { name: "AES-GCM", iv }, state.masterKey, encryptedBuffer
@@ -500,14 +509,17 @@ function renderDecryptedPaste(payload, meta) {
     el.attachmentView.classList.add("d-none");
   }
 
-  const expiresText = meta.expiresAt ? new Date(meta.expiresAt).toLocaleString() : "Never";
+  let expiresText = "Never";
+  if (meta.expiration !== "never") {
+    expiresText = meta.expiration; 
+  }
   const burnText = meta.burnAfterReading ? "Yes" : "No";
   const discussionText = meta.openDiscussion ? "Open" : "Closed";
   el.pasteMeta.textContent = `Expires: ${expiresText} | Burn: ${burnText} | Discussion: ${discussionText}`;
 
   el.pasteViewSection.classList.remove("d-none");
   el.cloneBtn.disabled = false;
-  el.deleteBtn.disabled = !state.deleteToken;
+  el.deleteBtn.disabled = false;
 }
 
 function toggleDiscussion(openDiscussion) {
@@ -543,30 +555,6 @@ async function resolveKeyFromFragment() {
   }
 
   throw new Error("Missing decryption key in URL fragment.");
-}
-
-async function buildPlainPayload(text, formatter, file) {
-  const payload = {
-    text,
-    formatter,
-    createdAt: new Date().toISOString()
-  };
-
-  if (file) {
-    payload.attachment = await fileToAttachment(file);
-  }
-
-  return payload;
-}
-
-async function fileToAttachment(file) {
-  const buffer = await file.arrayBuffer();
-  return {
-    name: file.name,
-    type: file.type || "application/octet-stream",
-    size: file.size,
-    data: bytesToBase64Url(new Uint8Array(buffer))
-  };
 }
 
 async function buildFragment(masterKey, password) {
@@ -650,27 +638,6 @@ async function decryptToText(payload, key) {
   return new TextDecoder().decode(plaintext);
 }
 
-async function apiJson(path, options = {}) {
-  const headers = {
-    "Content-Type": "application/json",
-    ...(options.headers || {})
-  };
-
-  const response = await fetch(buildApiUrl(path), {
-    ...options,
-    headers
-  });
-
-  const json = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    const message = json.error || `HTTP ${response.status}`;
-    throw new Error(message);
-  }
-
-  return json;
-}
-
 function setCreateLoading(loading) {
   el.createBtn.disabled = loading;
   el.createSpinner.classList.toggle("d-none", !loading);
@@ -703,18 +670,11 @@ function showAlert(type, message, timeoutMs = 4500) {
   }
 }
 
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
-
 function bytesToBase64Url(bytes) {
   let binary = "";
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
   }
-
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
@@ -727,7 +687,6 @@ function base64UrlToBytes(value) {
   for (let i = 0; i < binary.length; i += 1) {
     bytes[i] = binary.charCodeAt(i);
   }
-
   return bytes;
 }
 

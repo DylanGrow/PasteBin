@@ -1,108 +1,45 @@
 # CodexBin
 
-CodexBin is a self-hosted encrypted pastebin (PrivateBin-style) with:
+CodexBin is a serverless, encrypted pastebin that stores your pastes as **GitHub Secret Gists**. It has no custom backend server; the frontend talks directly to the GitHub API.
 
-- Static frontend on GitHub Pages (`docs/`)
-- Cloudflare Worker backend (`worker/`)
-- AES-256-GCM client-side encryption with Web Crypto
-- URL fragment key transport (`#...`) so the server never receives plaintext keys
-- Optional password protection using PBKDF2-derived wrapping key
-- Encrypted comments, expiration, burn-after-reading, attachments, syntax/markdown rendering, copy-link + QR
+- **Static Frontend**: Can be hosted on GitHub Pages (`docs/` folder).
+- **GitHub Backend**: Uses GitHub Secret Gists to store data.
+- **Client-Side Encryption**: AES-256-GCM client-side encryption using the Web Crypto API.
+- **Zero Knowledge**: URL fragment key transport (`#...`) ensures the GitHub API never sees plaintext keys.
+- **Features**: Optional password protection, encrypted comments, self-destruct (burn-after-reading), attachments (up to 1MB), syntax rendering.
 
-## Repository layout
+## Setup Instructions
 
-```text
-/
-├── docs/
-│   ├── index.html
-│   ├── css/
-│   └── js/
-├── worker/
-│   ├── index.js
-│   └── wrangler.toml
-└── .github/workflows/deploy.yml
-```
+### 1. Generate a GitHub Personal Access Token (PAT)
 
-## 1) Cloudflare setup
+Since the app creates Gists on your behalf, you must supply a GitHub Personal Access Token:
+1. Go to your GitHub account settings -> **Developer settings** -> **Personal access tokens** -> **Tokens (classic)**.
+2. Click **Generate new token (classic)**.
+3. Give it a name (e.g., "CodexBin") and check the `gist` scope.
+4. Set the expiration to "No expiration" or whatever you prefer.
+5. Generate and copy the token.
 
-1. Create a Cloudflare account and install Wrangler locally:
+### 2. Configure the Frontend
 
-```bash
-npm install -g wrangler
-wrangler login
-```
+1. Open `docs/js/app.js`.
+2. At the very top of the file, replace the placeholder with your token:
+   ```javascript
+   const GITHUB_PAT = "ghp_your_actual_token_here";
+   ```
+   **Warning**: If you deploy this publicly, anyone can view your token in the source code. This setup is intended for private self-hosting or personal use.
 
-2. Create KV namespaces:
+### 3. Deploy to GitHub Pages
 
-```bash
-wrangler kv namespace create "PASTES"
-wrangler kv namespace create "PASTES" --preview
-wrangler kv namespace create "RATE_LIMITS"
-wrangler kv namespace create "RATE_LIMITS" --preview
-```
+1. Push this repository to GitHub.
+2. Go to **Settings -> Pages**.
+3. Under "Build and deployment", set **Source** to `GitHub Actions`.
+4. The workflow in `.github/workflows/deploy.yml` will automatically deploy your `docs/` folder to GitHub Pages.
 
-3. Copy the returned namespace IDs into [worker/wrangler.toml](worker/wrangler.toml):
-- `PASTES_KV_NAMESPACE_ID`
-- `PASTES_KV_PREVIEW_NAMESPACE_ID`
-- `RATE_LIMITS_KV_NAMESPACE_ID`
-- `RATE_LIMITS_KV_PREVIEW_NAMESPACE_ID`
+## How it works
 
-4. Deploy once manually to confirm:
+- **Create Paste**: `POST https://api.github.com/gists`. Creates a Secret Gist containing `paste.json` and optionally `attachment.b64`.
+- **View Paste**: `GET https://api.github.com/gists/:id`.
+- **Delete Paste**: `DELETE https://api.github.com/gists/:id`.
+- **Comments**: Uses GitHub's built-in Gist comments API (`POST /gists/:id/comments`).
 
-```bash
-cd worker
-wrangler deploy
-```
-
-## 2) GitHub Actions secrets
-
-In your GitHub repository:
-
-1. Go to `Settings -> Secrets and variables -> Actions`.
-2. Add:
-- `CF_API_TOKEN` (token with Workers + KV edit permissions)
-- `CF_ACCOUNT_ID` (your Cloudflare account ID)
-
-The workflow in [deploy.yml](.github/workflows/deploy.yml) deploys the worker on push to `main` when files in `worker/` change.
-
-## 3) Enable GitHub Pages frontend
-
-1. Push this repo to GitHub.
-2. Open `Settings -> Pages`.
-3. Set `Source` to `Deploy from a branch`.
-4. Select branch `main` and folder `/docs`.
-5. Save and wait for Pages to publish.
-
-## 4) Connect frontend to backend
-
-After Worker deployment, copy your Worker URL (for example `https://codexbin-worker.<subdomain>.workers.dev`).
-
-In the app UI, set **Worker API base URL** to that Worker URL and create a paste.
-
-You can also prefill your own default in [app.js](docs/js/app.js) by changing:
-
-```js
-const DEFAULT_API_BASE = "https://your-worker-subdomain.workers.dev";
-```
-
-## API endpoints
-
-- `POST /api/paste` - store encrypted paste blob
-- `GET /api/paste/:id` - retrieve encrypted paste blob
-- `DELETE /api/paste/:id` - delete via `X-Delete-Token`
-- `POST /api/paste/:id/comment` - add encrypted comment
-- `GET /api/paste/:id/comments` - list encrypted comments
-
-Worker behavior:
-
-- KV TTL follows expiration selection (`5min`, `1hr`, `1day`, `1week`, `never`)
-- Burn-after-reading deletes paste/comments after first read
-- IP rate limit: 10 requests/minute (KV-backed)
-
-## Rename / branding
-
-To replace `CodexBin` with your own name:
-
-1. Update title/brand text in [index.html](docs/index.html)
-2. Update Worker name in [wrangler.toml](worker/wrangler.toml)
-3. Update this README title
+*Note: Gists don't support native time-to-live (TTL). The frontend enforces expiration by deleting the Gist upon retrieval if the expiration time has passed, or if burn-after-reading is enabled.*
