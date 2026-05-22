@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /$
+Allow: /index.html
+Allow: /css/
+Allow: /js/
+Disallow: /*?p=
+Disallow: /*?*
+
+Sitemap: https://yourdomain.com/sitemap.xml

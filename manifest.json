@@ -1,0 +1,10 @@
+{
+  "name": "CodexBin - Secure Encrypted Pastebin",
+  "short_name": "CodexBin",
+  "description": "Secure, zero-knowledge, client-side encrypted pastebin. Create, share, password-protect, and discuss encrypted pastes with complete privacy.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b0d13",
+  "theme_color": "#a855f7",
+  "orientation": "any"
+}
